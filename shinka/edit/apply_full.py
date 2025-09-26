@@ -104,6 +104,8 @@ def apply_full_patch(
                     end_marker = "# EVOLVE-BLOCK-END"
                 elif language in ["cuda", "cpp"]:
                     end_marker = "// EVOLVE-BLOCK-END"
+                elif language == "go":
+                    end_marker = "// EVOLVE-BLOCK-END"
                 else:
                     end_marker = "# EVOLVE-BLOCK-END"  # Default fallback
 
@@ -146,6 +148,8 @@ def apply_full_patch(
         suffix = ".cpp"
     elif language == "cuda":
         suffix = ".cu"
+    elif language == "go":
+        suffix = ".go"
     else:
         raise ValueError(f"Language {language} not supported")
 

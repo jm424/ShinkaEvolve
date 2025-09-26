@@ -231,6 +231,8 @@ class EvolutionRunner:
             self.lang_ext = "cpp"
         elif self.evo_config.language == "python":
             self.lang_ext = "py"
+        elif self.evo_config.language == "go":
+            self.lang_ext = "go"
         else:
             msg = f"Language {self.evo_config.language} not supported"
             raise ValueError(msg)

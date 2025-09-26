@@ -263,6 +263,10 @@ def analyze_code_metrics(code_string, language="python"):
     elif language in ["cpp", "c", "cuda", "c++"]:
         return analyze_cpp_complexity(code_string)
 
+    # For Go, use generic complexity analysis for now
+    elif language == "go":
+        return analyze_generic_complexity(code_string)
+
     # For unknown languages, use simple line-based complexity
     else:
         return analyze_generic_complexity(code_string)
