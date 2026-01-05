@@ -39,6 +39,10 @@ CLAUDE_MODELS = {
         "input_price": 3.0 / M,
         "output_price": 15.0 / M,
     },
+    "claude-opus-4-5-20251101": {
+        "input_price": 5.0 / M,
+        "output_price": 25.0 / M,
+    },
 }
 
 OPENAI_MODELS = {
@@ -122,6 +126,10 @@ OPENAI_MODELS = {
         "input_price": 1.25 / M,
         "output_price": 10.0 / M,
     },
+    "gpt-5.2": {
+        "input_price": 1.75 / M,
+        "output_price": 14.0 / M,
+    },
 }
 
 
@@ -183,12 +191,15 @@ REASONING_OAI_MODELS = [
     "gpt-5",
     "gpt-5-mini",
     "gpt-5-nano",
+    "gpt-5.1",
+    "gpt-5.2",
 ]
 
 REASONING_CLAUDE_MODELS = [
     "claude-3-7-sonnet-20250219",
     "claude-4-sonnet-20250514",
     "claude-sonnet-4-5-20250929",
+    "claude-opus-4-5-20251101",
 ]
 
 REASONING_DEEPSEEK_MODELS = [
@@ -199,6 +210,11 @@ REASONING_GEMINI_MODELS = [
     "gemini-2.5-pro",
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite-preview-06-17",
+    "gemini-3-pro-preview",
+]
+
+# Gemini 3 models use thinking_level instead of thinking_budget
+REASONING_GEMINI_3_MODELS = [
     "gemini-3-pro-preview",
 ]
 
@@ -213,4 +229,11 @@ REASONING_AZURE_MODELS = [
 REASONING_BEDROCK_MODELS = [
     "bedrock/us.anthropic.claude-3-7-sonnet-20250219-v1:0",
     "bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0",
+]
+
+# Models that support web search tool for real-time information retrieval
+WEB_SEARCH_ENABLED_MODELS = [
+    "gpt-5",
+    "gpt-5.1",
+    "gpt-5.2",
 ]

@@ -236,6 +236,11 @@ class Program:
         else:
             data["migration_history"] = []
 
+        # Ensure combined_score is not None (can be NULL from database)
+        # This prevents formatting errors when programs are loaded and summarized
+        if data.get("combined_score") is None:
+            data["combined_score"] = 0.0
+
         # Filter out keys not in Program fields to avoid TypeError with **data
         program_fields = {f.name for f in cls.__dataclass_fields__.values()}
         filtered_data = {k: v for k, v in data.items() if k in program_fields}

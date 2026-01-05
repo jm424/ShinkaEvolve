@@ -2,15 +2,20 @@ import logging
 from typing import Dict, List, Union, Optional
 import re
 import json
-import multiprocessing as mp
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 import asyncio
 from pydantic import BaseModel
 import time
+from rich.console import Console
 from .query import sample_model_kwargs, query
 from .models import QueryResult
 from .dynamic_sampling import BanditBase, FixedSampler
+from .streaming_display import InlineThinkingDisplay
+import os
 
 MAX_RETRIES = 3
+# Timeout in seconds for each query (20 minutes per query)
+QUERY_TIMEOUT_SECONDS = 1200
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +31,8 @@ class LLMClient:
         model_sample_probs: Optional[List[float]] = None,
         output_model: Optional[BaseModel] = None,
         verbose: bool = True,
+        show_thinking_trace: bool = False,
+        thinking_trace_lines: int = 6,
     ):
         self.temperatures = temperatures
         self.max_tokens = max_tokens
@@ -44,6 +51,11 @@ class LLMClient:
         self.output_model = output_model
         self.structured_output = output_model is not None
         self.verbose = verbose
+        
+        # Streaming display configuration
+        self.show_thinking_trace = show_thinking_trace
+        self.thinking_trace_lines = thinking_trace_lines
+        self._console = Console() if show_thinking_trace else None
 
     def batch_query(
         self,
@@ -69,56 +81,57 @@ class LLMClient:
         elif isinstance(msg_history[0], dict):
             msg_history = [msg_history] * num_samples
 
-        # multiprocess sample_kwargs_query
-        num_processes = min(num_samples, mp.cpu_count())
-        with mp.Pool(processes=num_processes) as pool:
-            # Submit all tasks asynchronously first
-            async_results = []
-            for i in range(len(msg)):
-                async_results.append(
-                    pool.apply_async(
-                        query_fn,
-                        args=(
-                            i,
-                            msg[i],
-                            system_msg[i],
-                            msg_history[i],
-                            llm_kwargs[i],
-                            num_samples,
-                            self.output_model,
-                            self.verbose,
-                        ),
-                    )
-                )
+        # Use ThreadPoolExecutor for concurrent API calls (I/O-bound)
+        max_workers = min(num_samples, os.cpu_count() or 4)
+        results = []
 
-            # Then collect all results and sort by index
-            results = []
-            for async_result in async_results:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks
+            futures = {}
+            for i in range(len(msg)):
+                future = executor.submit(
+                    query_fn,
+                    i,
+                    msg[i],
+                    system_msg[i],
+                    msg_history[i],
+                    llm_kwargs[i],
+                    num_samples,
+                    self.output_model,
+                    self.verbose,
+                )
+                futures[future] = i
+
+            # Collect results with timeout
+            for future in as_completed(futures, timeout=QUERY_TIMEOUT_SECONDS):
                 try:
-                    idx, result = async_result.get()
+                    idx, result = future.result(timeout=QUERY_TIMEOUT_SECONDS)
                     results.append((idx, result))
+                except FuturesTimeoutError:
+                    i = futures[future]
+                    logger.error(f"Timeout waiting for batch query result {i} after {QUERY_TIMEOUT_SECONDS}s")
                 except Exception as e:
                     logger.error(f"Error in batch query: {str(e)}")
 
-            # Sort by index and extract just the results
-            results.sort(key=lambda x: x[0])
-            final_results = [r[1] for r in results if r[1] is not None]
+        # Sort by index and extract just the results
+        results.sort(key=lambda x: x[0])
+        final_results = [r[1] for r in results if r[1] is not None]
 
-            # Print batch total cost
-            if self.verbose:
-                total_cost = sum(
-                    r.cost
-                    for r in final_results
-                    if hasattr(r, "cost") and r.cost is not None
-                )
-                formatted_costs = [
-                    f"{r.cost:.4f}"
-                    for r in final_results
-                    if hasattr(r, "cost") and r.cost is not None
-                ]
-                logger.info(f"==> SAMPLING: Individual API costs: {formatted_costs}")
-                logger.info(f"==> SAMPLING: Total API costs: ${total_cost:.4f}")
-            return final_results
+        # Print batch total cost
+        if self.verbose:
+            total_cost = sum(
+                r.cost
+                for r in final_results
+                if hasattr(r, "cost") and r.cost is not None
+            )
+            formatted_costs = [
+                f"{r.cost:.4f}"
+                for r in final_results
+                if hasattr(r, "cost") and r.cost is not None
+            ]
+            logger.info(f"==> SAMPLING: Individual API costs: {formatted_costs}")
+            logger.info(f"==> SAMPLING: Total API costs: ${total_cost:.4f}")
+        return final_results
 
     def batch_kwargs_query(
         self,
@@ -143,66 +156,68 @@ class LLMClient:
         elif isinstance(msg_history[0], dict):
             msg_history = [msg_history] * num_samples
 
-        # multiprocess sample_kwargs_query
-        num_processes = min(num_samples, mp.cpu_count())
-        with mp.Pool(processes=num_processes) as pool:
-            # Submit all tasks asynchronously first
-            async_results = []
-            posterior = self.llm_selection.posterior(samples=num_samples)
-            if self.verbose:
-                lines = [f"==> SAMPLING {num_samples} SAMPLES:"]
-                for name, prob in zip(self.model_names, posterior):
-                    lines.append(f"  {name:<30} {prob:>8.4f}")
-                logger.info("\n".join(lines))
-            for i in range(len(msg)):
-                async_results.append(
-                    pool.apply_async(
-                        sample_kwargs_query_fn,
-                        args=(
-                            i,
-                            msg[i],
-                            system_msg[i],
-                            msg_history[i],
-                            self.model_names,
-                            self.temperatures,
-                            self.max_tokens,
-                            self.reasoning_efforts,
-                            posterior,
-                            self.output_model,
-                            num_samples,
-                            self.verbose,
-                        ),
-                    )
-                )
+        # Use ThreadPoolExecutor for concurrent API calls (I/O-bound)
+        max_workers = min(num_samples, os.cpu_count() or 4)
+        results = []
 
-            # Then collect all results and sort by index
-            results = []
-            for async_result in async_results:
+        posterior = self.llm_selection.posterior(samples=num_samples)
+        if self.verbose:
+            lines = [f"==> SAMPLING {num_samples} SAMPLES:"]
+            for name, prob in zip(self.model_names, posterior):
+                lines.append(f"  {name:<30} {prob:>8.4f}")
+            logger.info("\n".join(lines))
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks
+            futures = {}
+            for i in range(len(msg)):
+                future = executor.submit(
+                    sample_kwargs_query_fn,
+                    i,
+                    msg[i],
+                    system_msg[i],
+                    msg_history[i],
+                    self.model_names,
+                    self.temperatures,
+                    self.max_tokens,
+                    self.reasoning_efforts,
+                    posterior,
+                    self.output_model,
+                    num_samples,
+                    self.verbose,
+                )
+                futures[future] = i
+
+            # Collect results with timeout
+            for future in as_completed(futures, timeout=QUERY_TIMEOUT_SECONDS):
                 try:
-                    idx, result = async_result.get()
+                    idx, result = future.result(timeout=QUERY_TIMEOUT_SECONDS)
                     results.append((idx, result))
+                except FuturesTimeoutError:
+                    i = futures[future]
+                    logger.error(f"Timeout waiting for batch query result {i} after {QUERY_TIMEOUT_SECONDS}s")
                 except Exception as e:
                     logger.error(f"Error in batch query: {str(e)}")
 
-            # Sort by index and extract just the results
-            results.sort(key=lambda x: x[0])
-            final_results = [r[1] for r in results if r[1] is not None]
+        # Sort by index and extract just the results
+        results.sort(key=lambda x: x[0])
+        final_results = [r[1] for r in results if r[1] is not None]
 
-            # Print batch total cost
-            if self.verbose:
-                total_cost = sum(
-                    r.cost
-                    for r in final_results
-                    if hasattr(r, "cost") and r.cost is not None
-                )
-                formatted_costs = [
-                    f"{r.cost:.4f}"
-                    for r in final_results
-                    if hasattr(r, "cost") and r.cost is not None
-                ]
-                logger.info(f"==> SAMPLING: Individual API costs: {formatted_costs}")
-                logger.info(f"==> SAMPLING: Total API costs: ${total_cost:.4f}")
-            return final_results
+        # Print batch total cost
+        if self.verbose:
+            total_cost = sum(
+                r.cost
+                for r in final_results
+                if hasattr(r, "cost") and r.cost is not None
+            )
+            formatted_costs = [
+                f"{r.cost:.4f}"
+                for r in final_results
+                if hasattr(r, "cost") and r.cost is not None
+            ]
+            logger.info(f"==> SAMPLING: Individual API costs: {formatted_costs}")
+            logger.info(f"==> SAMPLING: Total API costs: ${total_cost:.4f}")
+        return final_results
 
     def get_kwargs(self):
         posterior = self.llm_selection.posterior()
@@ -253,17 +268,42 @@ class LLMClient:
         posterior = self.llm_selection.posterior()
         model_posteriors = dict(zip(self.model_names, posterior))
         model_posteriors = {k: float(v) for k, v in model_posteriors.items()}
+        
+        # Create streaming display if enabled
+        streaming_display = None
+        if self.show_thinking_trace and self._console:
+            streaming_display = InlineThinkingDisplay(
+                console=self._console,
+                max_lines=self.thinking_trace_lines,
+                show_thinking=True,
+                show_text=True,  # Show both thinking and generated text
+            )
+        
         try_count = 0
         while try_count < MAX_RETRIES:
             try:
-                result = query(
-                    msg=msg,
-                    system_msg=system_msg,
-                    msg_history=msg_history,
-                    output_model=self.output_model,
-                    model_posteriors=model_posteriors,
-                    **llm_kwargs,
-                )
+                # Use context manager for streaming display
+                if streaming_display:
+                    with streaming_display:
+                        result = query(
+                            msg=msg,
+                            system_msg=system_msg,
+                            msg_history=msg_history,
+                            output_model=self.output_model,
+                            model_posteriors=model_posteriors,
+                            streaming_display=streaming_display,
+                            **llm_kwargs,
+                        )
+                else:
+                    result = query(
+                        msg=msg,
+                        system_msg=system_msg,
+                        msg_history=msg_history,
+                        output_model=self.output_model,
+                        model_posteriors=model_posteriors,
+                        **llm_kwargs,
+                    )
+                
                 if self.verbose and hasattr(result, "cost") and result.cost is not None:
                     logger.info(f"==> QUERY: API cost: ${result.cost:.4f}")
                 return result

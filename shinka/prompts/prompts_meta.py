@@ -31,7 +31,8 @@ META_STEP2_SYSTEM_MSG = (
     "You are an expert programming assistant analyzing specific program "
     "evaluation results to extract actionable optimization insights. Focus "
     "on concrete performance data and implementation details from the actual "
-    "programs that were evaluated."
+    "programs that were evaluated. Use a direct, technical tone without "
+    "dramatic or flowery language."
 )
 
 META_STEP2_USER_MSG = (
@@ -85,19 +86,23 @@ META_STEP2_USER_MSG = (
     "Reference specific program names, scores, and implementation details. "
     "Build upon previous insights with concrete evidence from the new evaluations. "
     "IMPORTANT: Make sure that the best results are not ignored and are "
-    "prominently featured in your analysis."
+    "prominently featured in your analysis. "
     "Do not make recommendations for the next steps. ONLY PERFORM THE "
-    "ANALYSIS."
+    "ANALYSIS.\n\n"
+    "Use direct, technical language without dramatic or flowery phrases."
 )
 
 # Step 3: Recommendations Generation
 META_STEP3_SYSTEM_MSG = (
     "You are an expert programming assistant generating actionable "
     "recommendations for future program mutations based on successful "
-    "patterns and insights."
+    "patterns and insights. Use a direct, technical tone without "
+    "dramatic or flowery language."
 )
 
 META_STEP3_USER_MSG = (
+    "# Task Context\n"
+    "{task_context}\n\n"
     "# Global Insights\n"
     "{global_insights}\n\n"
     "# Previous Recommendations (if any)\n"
@@ -112,17 +117,21 @@ META_STEP3_USER_MSG = (
     "2. **Actionable**: Something that can be directly applied\n"
     "3. **Evidence-based**: Grounded in the successful patterns identified\n"
     "4. **Diverse**: Cover different types of optimizations\n"
-    "5. **Best-program informed**: Consider what makes the current best program successful\n\n"
+    "5. **Best-program informed**: Consider what makes the current best program successful\n"
+    "6. **Task-aligned**: Must align with and support the task context and requirements above\n\n"
     "Format as a numbered list:\n\n"
     "1. [Specific recommendation based on successful patterns]\n"
     "2. [Another recommendation focusing on different aspect]\n"
     "...\n\n"
-    "**CRITICAL: Prioritize recommendations that build upon or extend the successful "
-    "patterns from the current best program. Consider both incremental improvements "
-    "to the best program's approach and novel variations that could surpass it.**\n\n"
+    "**CRITICAL: All recommendations MUST be consistent with the Task Context above. "
+    "Prioritize recommendations that build upon or extend the successful "
+    "patterns from the current best program while staying within the task requirements. "
+    "Consider both incremental improvements to the best program's approach and novel "
+    "variations that could surpass it.**\n\n"
     "Focus on the most promising approaches that have shown success in "
     "recent evaluations, especially those demonstrated by the best program. "
     "Avoid generic advice - provide 2-3 sentences per recommendation. "
     "DO NOT RECOMMEND CHANGING THE EVALUATION CODE. ONLY "
-    "MAKE ALGORITHMIC RECOMMENDATIONS."
+    "MAKE ALGORITHMIC RECOMMENDATIONS THAT ALIGN WITH THE TASK CONTEXT.\n\n"
+    "Use direct, technical language without dramatic or flowery phrases."
 )

@@ -27,6 +27,7 @@ from shinka.edit import (
     summarize_diff,
     redact_immutable,
 )
+from shinka.prompts import build_refinement_prompt, format_refinement_status
 from shinka.core.sampler import PromptSampler
 from shinka.core.summarizer import MetaSummarizer
 from shinka.core.novelty_judge import NoveltyJudge
@@ -62,6 +63,10 @@ class EvolutionConfig:
     novelty_llm_models: Optional[List[str]] = None
     novelty_llm_kwargs: dict = field(default_factory=lambda: {})
     use_text_feedback: bool = False
+    # Refinement configuration
+    max_refinement_iterations: int = 0  # 0 disables refinement
+    refine_only_on_failure: bool = True  # Only refine if compilation/correctness fails
+    refinement_mode: str = "diff"  # "diff" for SEARCH/REPLACE or "full" for complete rewrite
 
 
 @dataclass
@@ -217,6 +222,7 @@ class EvolutionRunner:
             language=evo_config.language,
             use_text_feedback=evo_config.use_text_feedback,
             max_recommendations=evo_config.meta_max_recommendations,
+            task_sys_msg=evo_config.task_sys_msg,
         )
 
         # Initialize NoveltyJudge for novelty assessment
@@ -790,20 +796,41 @@ class EvolutionRunner:
         # Get job results
         results = self.scheduler.get_job_results(job.job_id, job.results_dir)
 
-        # Read the evaluated code
+        # Run refinement loop if enabled (for generations > 0)
+        refinement_cost = 0.0
+        refinement_history = []
+        if (
+            self.evo_config.max_refinement_iterations > 0
+            and results
+            and job.generation > 0
+        ):
+            results, refinement_cost, refinement_history = self.run_refinement_loop(
+                exec_fname=job.exec_fname,
+                results_dir=job.results_dir,
+                results=results,
+                generation=job.generation,
+            )
+
+        # Read the evaluated code (may have been refined)
         try:
             evaluated_code = Path(job.exec_fname).read_text(encoding="utf-8")
         except Exception as e:
             logger.warning(f"Could not read code for job {job.job_id}. Error: {e}")
             evaluated_code = ""
 
-        # Use pre-computed embedding and novelty costs
-        code_embedding = job.code_embedding
-        e_cost = job.embed_cost
-        n_cost = job.novelty_cost
+        # Re-compute embedding if refinement was applied
+        if refinement_history:
+            code_embedding, e_cost = self.get_code_embedding(job.exec_fname)
+            n_cost = job.novelty_cost  # Keep original novelty cost
+        else:
+            # Use pre-computed embedding and novelty costs
+            code_embedding = job.code_embedding
+            e_cost = job.embed_cost
+            n_cost = job.novelty_cost
+            
         if self.verbose:
             logger.debug(
-                f"=> Using pre-computed embedding for job {job.job_id}, "
+                f"=> Embedding for job {job.job_id}, "
                 f"embed cost: {e_cost:.4f}, novelty cost: {n_cost:.4f}"
             )
 
@@ -822,6 +849,20 @@ class EvolutionRunner:
         private_metrics = metrics_val.get("private", {})
         text_feedback = metrics_val.get("text_feedback", "")
 
+        # Build metadata including refinement info if applicable
+        program_metadata = {
+            "compute_time": rtime,
+            **(job.meta_patch_data or {}),
+            "embed_cost": e_cost,
+            "novelty_cost": n_cost,
+            "stdout_log": stdout_log,
+            "stderr_log": stderr_log,
+        }
+        if refinement_history:
+            program_metadata["refinement_iterations"] = len(refinement_history)
+            program_metadata["refinement_cost"] = refinement_cost
+            program_metadata["refinement_history"] = refinement_history
+
         # Add the program to the database
         db_program = Program(
             id=str(uuid.uuid4()),
@@ -838,14 +879,7 @@ class EvolutionRunner:
             public_metrics=public_metrics,
             private_metrics=private_metrics,
             text_feedback=text_feedback,
-            metadata={
-                "compute_time": rtime,
-                **(job.meta_patch_data or {}),
-                "embed_cost": e_cost,
-                "novelty_cost": n_cost,
-                "stdout_log": stdout_log,
-                "stderr_log": stderr_log,
-            },
+            metadata=program_metadata,
         )
         self.db.add(db_program, verbose=True)
 
@@ -1169,6 +1203,230 @@ class EvolutionRunner:
             e_cost = 0.0
         return code_embedding, e_cost
 
+    def run_refinement_loop(
+        self,
+        exec_fname: str,
+        results_dir: str,
+        results: dict,
+        generation: int,
+    ) -> tuple[dict, float, list]:
+        """
+        Run refinement iterations to fix compilation/correctness errors.
+
+        Args:
+            exec_fname: Path to the main code file
+            results_dir: Directory for evaluation results
+            results: Initial evaluation results dict
+            generation: Current generation number
+
+        Returns:
+            Tuple of (final_results, total_refinement_cost, refinement_history)
+        """
+        max_iterations = self.evo_config.max_refinement_iterations
+        if max_iterations <= 0:
+            return results, 0.0, []
+
+        # Check if refinement is needed
+        correct_info = results.get("correct", {})
+        is_correct = correct_info.get("correct", False)
+
+        if self.evo_config.refine_only_on_failure and is_correct:
+            if self.verbose:
+                logger.debug(
+                    f"Gen {generation}: Skipping refinement - program is already correct"
+                )
+            return results, 0.0, []
+
+        # Log refinement start with failure reason
+        status_str = format_refinement_status(results)
+        if self.verbose:
+            logger.info(
+                f"Refinement Cycle for generation {generation} "
+                f"(status={status_str}, max_attempts={max_iterations})"
+            )
+
+        total_refinement_cost = 0.0
+        refinement_history = []
+        current_results = results
+        gen_dir = Path(exec_fname).parent
+
+        # Select patch application function based on refinement mode
+        if self.evo_config.refinement_mode == "diff":
+            apply_patch = apply_diff_patch
+        else:
+            apply_patch = apply_full_patch
+
+        for iteration in range(1, max_iterations + 1):
+            # Read current code
+            try:
+                current_code = Path(exec_fname).read_text(encoding="utf-8")
+            except Exception as e:
+                logger.warning(f"Could not read code for refinement: {e}")
+                break
+
+            # Build refinement prompt
+            refine_sys, refine_msg = build_refinement_prompt(
+                code=current_code,
+                results=current_results,
+                language=self.evo_config.language,
+                mode=self.evo_config.refinement_mode,
+            )
+
+            # Query LLM for refinement
+            llm_kwargs = self.llm.get_kwargs()
+            response = self.llm.query(
+                msg=refine_msg,
+                system_msg=refine_sys,
+                llm_kwargs=llm_kwargs,
+            )
+
+            if response is None or response.content is None:
+                if self.verbose:
+                    logger.info(
+                        f"  REFINE ATTEMPT {iteration}/{max_iterations} FAILURE. "
+                        f"Error=LLM response was empty."
+                    )
+                refinement_history.append({
+                    "iteration": iteration,
+                    "cost": 0.0,
+                    "mode": self.evo_config.refinement_mode,
+                    "status": "LLM FAILURE",
+                    "is_correct": False,
+                    "error": "LLM response was empty",
+                })
+                continue
+
+            iteration_cost = response.cost or 0.0
+            total_refinement_cost += iteration_cost
+
+            # Extract patch name and description from response
+            refine_name = extract_between(
+                response.content, "<NAME>", "</NAME>", False
+            )
+            refine_description = extract_between(
+                response.content, "<DESCRIPTION>", "</DESCRIPTION>", False
+            )
+
+            # Apply the refinement patch WITHOUT patch_dir to avoid overwriting original.py
+            # We'll handle file writing manually to preserve the parent's original.py
+            (
+                updated_code,
+                num_applied,
+                _,  # output_path - not used since patch_dir=None
+                error,
+                _,  # patch_txt - we'll generate our own
+                _,  # patch_path - not used
+            ) = apply_patch(
+                original_str=current_code,
+                patch_str=response.content,
+                patch_dir=None,  # Don't let it overwrite original.py
+                language=self.evo_config.language,
+                verbose=False,
+            )
+
+            # Save the refinement outputs manually
+            refine_suffix = f"_refine_{iteration}"
+            if num_applied > 0 and error is None:
+                # Write the refined code to main.py
+                Path(exec_fname).write_text(updated_code, encoding="utf-8")
+                
+                # Save the search/replace text (for diff mode)
+                if self.evo_config.refinement_mode == "diff":
+                    refine_txt_path = gen_dir / f"search_replace{refine_suffix}.txt"
+                    diff_content = extract_between(response.content, "<DIFF>", "</DIFF>", False)
+                    if diff_content:
+                        refine_txt_path.write_text(str(diff_content), encoding="utf-8")
+                else:
+                    # For full mode, save the rewrite
+                    refine_txt_path = gen_dir / f"rewrite{refine_suffix}.txt"
+                    code_content = extract_between(response.content, "<CODE>", "</CODE>", False)
+                    if code_content:
+                        refine_txt_path.write_text(str(code_content), encoding="utf-8")
+
+            if error is not None or num_applied == 0:
+                error_str = str(error) if error else "No changes applied"
+                if self.verbose:
+                    logger.info(
+                        f"  REFINE ATTEMPT {iteration}/{max_iterations} FAILURE. "
+                        f"Error={error_str[:80]}."
+                    )
+                refinement_history.append({
+                    "iteration": iteration,
+                    "cost": iteration_cost,
+                    "mode": self.evo_config.refinement_mode,
+                    "status": "PATCH FAILED",
+                    "is_correct": False,
+                    "error": error_str,
+                })
+                continue
+
+            # Save the refined code snapshot (main.py was already updated above)
+            try:
+                snapshot_path = gen_dir / f"main_refine_{iteration}.{self.lang_ext}"
+                snapshot_path.write_text(updated_code, encoding="utf-8")
+            except Exception as e:
+                logger.warning(f"Could not save refinement snapshot: {e}")
+
+            # Print refinement patch metadata table
+            if self.verbose:
+                refine_meta = {
+                    "patch_type": f"refine_{self.evo_config.refinement_mode}",
+                    "patch_name": refine_name,
+                    "patch_description": refine_description,
+                    "num_applied": num_applied,
+                    "api_costs": iteration_cost,
+                    "error_attempt": None,  # No error if we got here
+                    "refine_iteration": iteration,
+                    "novelty_attempt": 1,
+                    "resample_attempt": 1,
+                    "patch_attempt": iteration,
+                }
+                self._print_metadata_table(refine_meta, generation)
+
+            # Re-evaluate the refined code
+            current_results, eval_time = self.scheduler.run(exec_fname, results_dir)
+
+            # Check if now correct and extract metrics
+            new_correct_info = current_results.get("correct", {}) if current_results else {}
+            is_now_correct = new_correct_info.get("correct", False)
+            new_metrics = current_results.get("metrics", {}) if current_results else {}
+            new_score = new_metrics.get("combined_score", 0.0)
+            new_status_str = format_refinement_status(current_results) if current_results else "NO RESULTS"
+
+            refinement_history.append({
+                "iteration": iteration,
+                "cost": iteration_cost,
+                "mode": self.evo_config.refinement_mode,
+                "status": new_status_str,
+                "is_correct": is_now_correct,
+                "combined_score": new_score,
+                "eval_time": eval_time,
+            })
+
+            if self.verbose:
+                if is_now_correct:
+                    logger.info(
+                        f"  REFINE ATTEMPT {iteration}/{max_iterations} SUCCESS. "
+                        f"Result_status={new_status_str}, Score={new_score:.2f}."
+                    )
+                else:
+                    logger.info(
+                        f"  REFINE ATTEMPT {iteration}/{max_iterations} FAILURE. "
+                        f"Result_status={new_status_str}, Score={new_score:.2f}."
+                    )
+
+            # Stop if we achieved correctness
+            if is_now_correct:
+                break
+
+        # Print refinement summary table
+        if self.verbose and refinement_history:
+            self._print_refinement_summary(
+                generation, refinement_history, total_refinement_cost
+            )
+
+        return current_results, total_refinement_cost, refinement_history
+
     def _print_metadata_table(self, meta_data: dict, generation: int):
         """Display metadata in a formatted rich table."""
         # Create title with generation and attempt information
@@ -1176,9 +1434,16 @@ class EvolutionRunner:
 
         # Add generation if present
         if generation is not None:
-            title_parts.append(
-                f" - Gen {generation}/{self.evo_config.num_generations} - Novelty: {meta_data['novelty_attempt']}/{self.evo_config.max_novelty_attempts} - Resample: {meta_data['resample_attempt']}/{self.evo_config.max_patch_resamples} - Patch: {meta_data['patch_attempt']}/{self.evo_config.max_patch_attempts}"
+            title_str = (
+                f" - Gen {generation}/{self.evo_config.num_generations}"
+                f" - Novelty: {meta_data['novelty_attempt']}/{self.evo_config.max_novelty_attempts}"
+                f" - Resample: {meta_data['resample_attempt']}/{self.evo_config.max_patch_resamples}"
+                f" - Patch: {meta_data['patch_attempt']}/{self.evo_config.max_patch_attempts}"
             )
+            # Add refinement progress if present
+            if "refine_iteration" in meta_data:
+                title_str += f" - Refine: {meta_data['refine_iteration']}/{self.evo_config.max_refinement_iterations}"
+            title_parts.append(title_str)
 
         # Add attempt information if present
         if all(
@@ -1273,6 +1538,81 @@ class EvolutionRunner:
                 table.add_row("diff_summary", summary_text.strip())
             else:
                 table.add_row("diff_summary", str(diff_summary)[:200])
+
+        self.console.print(table)
+
+    def _print_refinement_summary(
+        self,
+        generation: int,
+        refinement_history: list,
+        total_cost: float,
+    ) -> None:
+        """Display refinement summary in a formatted rich table."""
+        # Determine final status
+        if refinement_history:
+            last_entry = refinement_history[-1]
+            final_correct = last_entry.get("is_correct", False)
+            final_status = last_entry.get("status", "UNKNOWN")
+            final_score = last_entry.get("combined_score", 0.0)
+        else:
+            final_correct = False
+            final_status = "NO ATTEMPTS"
+            final_score = 0.0
+
+        # Create table with colored outcome
+        if final_correct:
+            outcome = "[bold green]SUCCESS[/bold green]"
+        else:
+            outcome = "[bold red]FAILED[/bold red]"
+        table = Table(
+            title=f"[bold cyan]Refinement Summary[/bold cyan] - Gen {generation} - {outcome}",
+            show_header=True,
+            header_style="bold cyan",
+            border_style="cyan",
+            box=rich.box.ROUNDED,
+            width=100,
+        )
+        table.add_column("Iteration", style="cyan", width=10)
+        table.add_column("Status", width=30)
+        table.add_column("Score", style="yellow", justify="right", width=12)
+        table.add_column("Cost", style="green", justify="right", width=12)
+        table.add_column("Eval Time", style="blue", justify="right", width=12)
+
+        for entry in refinement_history:
+            iteration = str(entry.get("iteration", "?"))
+            status = entry.get("status", "UNKNOWN")
+            is_correct = entry.get("is_correct", False)
+            score = entry.get("combined_score", 0.0)
+            cost = entry.get("cost", 0.0)
+            eval_time = entry.get("eval_time", 0.0)
+
+            # Color status based on result
+            if is_correct:
+                status_str = f"[bold green]✓ {status}[/bold green]"
+            elif "COMPILATION" in status or "PATCH FAILED" in status or "LLM FAILURE" in status:
+                status_str = f"[bold red]✗ {status}[/bold red]"
+            else:
+                status_str = f"[yellow]✗ {status}[/yellow]"
+
+            score_str = f"{score:.2f}" if isinstance(score, (int, float)) else str(score)
+            cost_str = f"${cost:.4f}" if isinstance(cost, (int, float)) else str(cost)
+            time_str = f"{eval_time:.1f}s" if isinstance(eval_time, (int, float)) and eval_time > 0 else "-"
+
+            table.add_row(iteration, status_str, score_str, cost_str, time_str)
+
+        # Add totals row with styling
+        if final_correct:
+            final_status_str = f"[bold green]✓ {final_status}[/bold green]"
+        else:
+            final_status_str = f"[bold red]✗ {final_status}[/bold red]"
+        
+        table.add_row(
+            "[bold]Total[/bold]",
+            final_status_str,
+            f"[bold]{final_score:.2f}[/bold]",
+            f"[bold]${total_cost:.4f}[/bold]",
+            "",
+        )
 
         self.console.print(table)
 

@@ -40,7 +40,15 @@ for i in range(m):
 * Do not repeat the markers "EVOLVE-BLOCK-START" and "EVOLVE-BLOCK-END" in the SEARCH/REPLACE blocks.  
 * Every block’s SEARCH section must be copied **verbatim** from the current file.  Including indentation.
 * You can propose multiple independent edits. SEARCH/REPLACE blocks follow one after another. DO NOT ADD ANY OTHER TEXT BETWEEN THESE BLOCKS.
-* Make sure the file still runs after your changes."""
+* Make sure the file still runs after your changes.
+
+CRITICAL - SEARCH BLOCK RULES (failures here waste time and money):
+* The SEARCH text must be an EXACT character-for-character copy from the current program above.
+* Do NOT reorganize, reorder lines, add/remove blank lines, or "clean up" the code in the SEARCH block.
+* Do NOT swap the order of statements even if they seem independent.
+* Keep SEARCH blocks small and targeted (5-15 lines ideal). Avoid replacing entire classes or large functions.
+* If you need to change multiple parts of a function, use multiple small SEARCH/REPLACE blocks.
+* When in doubt, include more surrounding context lines to ensure uniqueness."""
 
 
 DIFF_ITER_MSG = """# Current program
@@ -67,5 +75,8 @@ Suggest a new idea to improve the performance of the code that is inspired by yo
 Your goal is to maximize the `combined_score` of the program.
 Describe each change with a SEARCH/REPLACE block.
 
-IMPORTANT: Do not rewrite the entire program - focus on targeted improvements.
+IMPORTANT: 
+- Do not rewrite the entire program - focus on targeted improvements.
+- Use SMALL SEARCH blocks (5-15 lines). Large blocks are prone to matching failures.
+- Copy the SEARCH text EXACTLY from the code above - do not reorganize or reorder lines.
 """

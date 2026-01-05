@@ -1,4 +1,4 @@
-from typing import List, Dict
+from typing import List, Dict, Optional
 from shinka.database import Program
 
 
@@ -10,8 +10,11 @@ BASE_SYSTEM_MSG = (
 )
 
 
-def perf_str(combined_score: float, public_metrics: Dict[str, float]) -> str:
-    perf_str = f"Combined score to maximize: {combined_score:.2f}\n"
+def perf_str(combined_score: Optional[float], public_metrics: Dict[str, float]) -> str:
+    if combined_score is not None:
+        perf_str = f"Combined score to maximize: {combined_score:.2f}\n"
+    else:
+        perf_str = "Combined score to maximize: N/A\n"
     for key, value in public_metrics.items():
         if isinstance(value, float):
             perf_str += f"{key}: {value:.2f}; "

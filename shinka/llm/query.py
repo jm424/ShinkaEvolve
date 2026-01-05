@@ -1,4 +1,4 @@
-from typing import List, Union, Optional, Dict
+from typing import List, Union, Optional, Dict, TYPE_CHECKING
 import random
 from pydantic import BaseModel
 from .client import get_client_llm
@@ -12,8 +12,10 @@ from .models.pricing import (
     REASONING_CLAUDE_MODELS,
     REASONING_DEEPSEEK_MODELS,
     REASONING_GEMINI_MODELS,
+    REASONING_GEMINI_3_MODELS,
     REASONING_AZURE_MODELS,
     REASONING_BEDROCK_MODELS,
+    WEB_SEARCH_ENABLED_MODELS,
 )
 from .models import (
     query_anthropic,
@@ -24,6 +26,9 @@ from .models import (
 )
 import logging
 
+if TYPE_CHECKING:
+    from .streaming_display import InlineThinkingDisplay
+
 logger = logging.getLogger(__name__)
 
 
@@ -33,6 +38,24 @@ THINKING_TOKENS = {
     "medium": 4096,
     "high": 8192,
     "max": 16384,
+}
+
+# Gemini 2.5 thinking_budget mapping (uses token counts)
+GEMINI_25_THINKING_BUDGET = {
+    "auto": -1,  # Auto mode (let model decide)
+    "low": 1024,
+    "medium": 8192,
+    "high": 24576,
+    "max": 24576,  # Max maps to high (24,576 is the maximum)
+}
+
+# Gemini 3 thinking_level mapping (uses "low" or "high" strings only)
+GEMINI_3_THINKING_LEVEL = {
+    "auto": "high",  # Default is high
+    "low": "low",
+    "medium": "high",
+    "high": "high",
+    "max": "high",  # Max maps to high (only low/high available)
 }
 
 
@@ -132,18 +155,44 @@ def sample_model_kwargs(
         if r_effort != "auto":
             kwargs_dict["reasoning"] = {"effort": r_effort}
 
-    if kwargs_dict["model_name"] in (REASONING_GEMINI_MODELS):
+    # Enable web search for supported models (GPT-5, GPT-5.1)
+    # This allows the model to fetch real-time information from the web
+    # (e.g., API docs, library updates) to generate better code
+    if kwargs_dict["model_name"] in WEB_SEARCH_ENABLED_MODELS:
+        kwargs_dict["tools"] = [{"type": "web_search"}]
+
+    if kwargs_dict["model_name"] in (REASONING_GEMINI_3_MODELS):
+        # Gemini 3 uses thinking_level: "low" or "high"
         kwargs_dict["max_tokens"] = random.choice(max_tokens)
         r_effort = random.choice(reasoning_efforts)
         think_bool = r_effort != "auto"
         if think_bool:
-            t = THINKING_TOKENS[r_effort]
-            thinking_tokens = t if t < kwargs_dict["max_tokens"] else 1024
+            thinking_level = GEMINI_3_THINKING_LEVEL[r_effort]
             kwargs_dict["extra_body"] = {
                 "extra_body": {
                     "google": {
                         "thinking_config": {
-                            "thinking_budget": thinking_tokens,
+                            "thinking_level": thinking_level,
+                            "include_thoughts": True,
+                        }
+                    }
+                }
+            }
+
+    elif kwargs_dict["model_name"] in (REASONING_GEMINI_MODELS):
+        # Gemini 2.5 uses thinking_budget: token count
+        kwargs_dict["max_tokens"] = random.choice(max_tokens)
+        r_effort = random.choice(reasoning_efforts)
+        think_bool = r_effort != "auto"
+        if think_bool:
+            thinking_budget = GEMINI_25_THINKING_BUDGET[r_effort]
+            # Ensure thinking_budget doesn't exceed max_tokens
+            thinking_budget = min(thinking_budget, kwargs_dict["max_tokens"] - 1024)
+            kwargs_dict["extra_body"] = {
+                "extra_body": {
+                    "google": {
+                        "thinking_config": {
+                            "thinking_budget": thinking_budget,
                             "include_thoughts": True,
                         }
                     }
@@ -153,7 +202,7 @@ def sample_model_kwargs(
     elif kwargs_dict["model_name"] in (
         REASONING_CLAUDE_MODELS + REASONING_BEDROCK_MODELS
     ):
-        kwargs_dict["max_tokens"] = min(random.choice(max_tokens), 16384)
+        kwargs_dict["max_tokens"] = min(random.choice(max_tokens), 65536)
         r_effort = random.choice(reasoning_efforts)
         think_bool = r_effort != "auto"
         if think_bool:
@@ -190,9 +239,24 @@ def query(
     msg_history: List = [],
     output_model: Optional[BaseModel] = None,
     model_posteriors: Optional[Dict[str, float]] = None,
+    streaming_display: Optional["InlineThinkingDisplay"] = None,
     **kwargs,
 ) -> QueryResult:
-    """Query the LLM."""
+    """Query the LLM.
+    
+    Args:
+        model_name: Name of the model to query
+        msg: User message
+        system_msg: System message
+        msg_history: Message history
+        output_model: Optional Pydantic model for structured output
+        model_posteriors: Optional dict of model posterior probabilities
+        streaming_display: Optional InlineThinkingDisplay for real-time output
+        **kwargs: Additional arguments passed to the model-specific query function
+    
+    Returns:
+        QueryResult with the model's response
+    """
     client, model_name = get_client_llm(
         model_name, structured_output=output_model is not None
     )
@@ -214,6 +278,7 @@ def query(
         msg_history,
         output_model,
         model_posteriors=model_posteriors,
+        streaming_display=streaming_display,
         **kwargs,
     )
     return result

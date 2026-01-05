@@ -26,11 +26,13 @@ class MetaSummarizer:
         language: str = "python",
         use_text_feedback: bool = False,
         max_recommendations: int = 5,
+        task_sys_msg: Optional[str] = None,
     ):
         self.meta_llm_client = meta_llm_client
         self.language = language
         self.use_text_feedback = use_text_feedback
         self.max_recommendations = max_recommendations
+        self.task_sys_msg = task_sys_msg
 
         # Meta state
         self.meta_summary = None
@@ -349,11 +351,17 @@ class MetaSummarizer:
         else:
             best_program_info = "*No best program information available.*"
 
+        # Format task context
+        task_context = "*No task context available.*"
+        if self.task_sys_msg:
+            task_context = self.task_sys_msg
+
         user_msg = (
             META_STEP3_USER_MSG.replace("{global_insights}", global_insights)
             .replace("{previous_recommendations}", previous_recommendations)
             .replace("{max_recommendations}", str(self.max_recommendations))
             .replace("{best_program_info}", best_program_info)
+            .replace("{task_context}", task_context)
         )
 
         llm_params = self.meta_llm_client.get_kwargs()

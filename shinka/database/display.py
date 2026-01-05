@@ -110,7 +110,8 @@ class DatabaseDisplay:
             embed_cost = float(program.metadata.get("embed_cost", 0))
             novelty_cost = float(program.metadata.get("novelty_cost", 0))
             meta_cost = float(program.metadata.get("meta_cost", 0))
-            total_cost = api_cost + embed_cost + novelty_cost + meta_cost
+            refinement_cost = float(program.metadata.get("refinement_cost", 0))
+            total_cost = api_cost + embed_cost + novelty_cost + meta_cost + refinement_cost
             cost_display = f"${total_cost:.3f}"
 
         # Format time
@@ -164,9 +165,10 @@ class DatabaseDisplay:
         total_embed_cost = 0
         total_novelty_cost = 0
         total_meta_cost = 0
+        total_refinement_cost = 0
         total_compute_time = 0
         avg_score = 0.0
-        best_score = 0.0  # Initialize best_score
+        best_score = float('-inf')  # Initialize to -inf so any finite score wins
         num_with_scores = 0
         all_scores = []
         if self.cursor:  # Ensure cursor is not None
@@ -183,6 +185,8 @@ class DatabaseDisplay:
                         total_novelty_cost += float(metadata["novelty_cost"])
                     if "meta_cost" in metadata:
                         total_meta_cost += float(metadata["meta_cost"])
+                    if "refinement_cost" in metadata:
+                        total_refinement_cost += float(metadata["refinement_cost"])
                     if "compute_time" in metadata:
                         total_compute_time += float(metadata["compute_time"])
 
@@ -309,7 +313,7 @@ class DatabaseDisplay:
 
         # Add cost information
         total_cost = (
-            total_api_cost + total_embed_cost + total_novelty_cost + total_meta_cost
+            total_api_cost + total_embed_cost + total_novelty_cost + total_meta_cost + total_refinement_cost
         )
         if total_cost > 0:
             cost_table.add_row("Total API Cost", f"[bold]${total_api_cost:.2f}[/bold]")
@@ -321,6 +325,9 @@ class DatabaseDisplay:
             )
             cost_table.add_row(
                 "Total Meta Cost", f"[bold]${total_meta_cost:.2f}[/bold]"
+            )
+            cost_table.add_row(
+                "Total Refinement Cost", f"[bold]${total_refinement_cost:.2f}[/bold]"
             )
             cost_table.add_row("Total Combined Cost", f"[bold]${total_cost:.2f}[/bold]")
             if total_programs > 0:
@@ -587,7 +594,8 @@ class DatabaseDisplay:
                 embed_cost = float(prog.metadata.get("embed_cost", 0))
                 novelty_cost = float(prog.metadata.get("novelty_cost", 0))
                 meta_cost = float(prog.metadata.get("meta_cost", 0))
-                total_cost = api_cost + embed_cost + novelty_cost + meta_cost
+                refinement_cost = float(prog.metadata.get("refinement_cost", 0))
+                total_cost = api_cost + embed_cost + novelty_cost + meta_cost + refinement_cost
                 cost_display = f"${total_cost:.3f}"
 
             # Time
